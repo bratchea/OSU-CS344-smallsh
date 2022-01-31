@@ -13,23 +13,21 @@
 #define MAXLENGTH 2048
 #define MAXARGS 512
 
+/*
+Globals
+*/
+bool foregroundOnly = false;
+
 // struct to store parsed user input
 struct userInput {
     char *command;
     char *userArgs[MAXARGS];
+    char *builtArgs[MAXARGS];
     char *inputFile;
     char *outputFile;
     bool inBackground;
     bool redirect;
 };
-
-void printUserInput(struct userInput ui) {
-    printf("command: %s\n", ui.command);
-    printf("args: %s\n", ui.userArgs[0]);
-    printf("input file: %s\n", ui.inputFile);
-    printf("output file: %s\n", ui.outputFile);
-    printf("%d\n", ui.inBackground);
-}
 
 /*
 Gets user input and return char pointer
@@ -42,13 +40,16 @@ char *getUserInput(void) {
 
     // replace newline from end of user input with null terminator
     uInput[strlen(uInput) - 1] = '\0';
+    fflush(stdin);
+    fflush(stdout);
 
     return uInput;
 }
 
 /*
-Parse user input into a struct userInput
-command [arg1 arg2 ...] [< input_file] [> output_file] [&]
+Parses user input into a struct userInput
+user input example: command [arg1 arg2 ...] [< input_file] [> output_file] [&]
+Returns *struct userInput
 */
 struct userInput *parseUserInput(char *ui) {
     struct userInput *parsedInput = malloc(sizeof(struct userInput));
@@ -63,15 +64,13 @@ struct userInput *parseUserInput(char *ui) {
 
     // first part of user input should command
     token = strtok_r(ui, " ", &posptr);
+    if (token == NULL) {
+        parsedInput->command = NULL;
+        return parsedInput;
+    }
 
     parsedInput->command = calloc(strlen(token) + 1, sizeof(char));
     parsedInput->command = token;
-
-    // parsedInput->inBackground = false;
-    // parsedInput->inputFile = "inputfile";
-    // parsedInput->outputFile = "outputfile";
-    // parsedInput->userArgs[0] = calloc(5, sizeof(char));
-    // strcpy(parsedInput->userArgs[0], "arg1");
 
     token = strtok_r(NULL, " ", &posptr);
     while (token != NULL) {
@@ -118,25 +117,90 @@ struct userInput *parseUserInput(char *ui) {
     return parsedInput;
 }
 
+/*
+Creates an array of arguments to be passed to execvp
+using the arguments stored in struct userInput.userArgs
+*/
+void buildArgs(struct userInput *ui) {
+    int argCount = 0;
+
+    // add command as first element of built args
+    ui->builtArgs[argCount] = ui->command;
+    argCount++;
+
+    while (ui->userArgs[argCount - 1] != NULL) {
+        ui->builtArgs[argCount] = ui->userArgs[argCount - 1];
+        argCount++;
+    }
+}
+
+void runProcess(struct userInput *ui) {
+    pid_t spawnid = -5;
+    int childStatus;
+    int childPid;
+
+    // If fork is successful, the value of spawnpid will be 0 in the child, the child's pid in the parent
+    spawnid = fork();
+    switch (spawnid) {
+        case -1:
+            printf("Oops! Something went wrong during fork!\n");
+            exit(1);
+            break;
+
+        case 0:
+            execvp(ui->command, ui->builtArgs);
+            printf("Oops! Error while running shell command!\n");
+            exit(1);
+
+        default:
+            if (ui->inBackground == true && foregroundOnly == false) {
+                printf("Backgroud pid is %d\n", spawnid);
+            } else {
+                // waits for the child process to execute
+                waitpid(spawnid, &childStatus, 0);
+            }
+    }
+}
+
 int main(void) {
-    struct userInput ui;
+    struct userInput *ui;
 
     char *uInput;
     int i = 0;
 
-    // printUserInput(ui);
+    while (true) {
+        uInput = getUserInput();
+        ui = parseUserInput(uInput);
+        buildArgs(ui);
 
-    uInput = getUserInput();
-    ui = *parseUserInput(uInput);
-    printf("\n%s\n", ui.command);
-    printf("\n%s\n", ui.inputFile);
-    printf("\n%s\n", ui.outputFile);
-    printf("\n%d\n", ui.inBackground);
-    printf("\n%d\n", ui.redirect);
+        // check if user entered a blank line or comment
+        if (ui->command == NULL || strncmp(ui->command, "#", 1) == 0) {
+            continue;
+        }
+        // check for exit command
+        else if (strcmp(ui->command, "exit") == 0) {
+            break;
+        } else if (strcmp(ui->command, "status") == 0) {
+            printf("status not implemented");
+        } else if (strcmp(ui->command, "cd") == 0) {
+            printf("cd command not implemented");
+        } else {
+            runProcess(ui);
+        }
 
-    while (ui.userArgs[i] != NULL) {
-        printf("%s ", ui.userArgs[i]);
-        i++;
+        // printf("command: %s\ninput file: %s\noutputfile: %s\nbackground: %d\nredirect: %d\n", ui->command, ui->inputFile, ui->outputFile, ui->inBackground, ui->redirect);
+
+        // while (ui->builtArgs[i] != NULL) {
+        //     printf("%s ", ui->builtArgs[i]);
+        //     i++;
+        // }
+        // i = 0;
+
+        fflush(stdin);
+        fflush(stdout);
+
+        // free memory from userInput struct
+        free(ui);
     }
 
     return EXIT_SUCCESS;
