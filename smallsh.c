@@ -13,10 +13,9 @@
 #define MAXLENGTH 2048
 #define MAXARGS 512
 
-/*
-Globals
-*/
+// Globals
 bool foregroundOnly = false;
+int foregroundStatus;
 
 // struct to store parsed user input
 struct userInput {
@@ -47,6 +46,25 @@ char *getUserInput(void) {
 }
 
 /*
+Clear user input from userInput struct and free memory
+that has been allocated
+*/
+void clearUserInput(struct userInput *ui) {
+    // reset boolean values to false
+    ui->inBackground = false;
+    ui->redirect = false;
+
+    // reset fields that have memory dynamically allocated
+    free(ui->command);
+    free(ui->inputFile);
+    free(ui->outputFile);
+
+    // reset values stored that have set lengths
+    memset(ui->userArgs, '\0', sizeof(ui->userArgs));
+    memset(ui->builtArgs, '\0', sizeof(ui->builtArgs));
+}
+
+/*
 Parses user input into a struct userInput
 user input example: command [arg1 arg2 ...] [< input_file] [> output_file] [&]
 Returns *struct userInput
@@ -70,7 +88,7 @@ struct userInput *parseUserInput(char *ui) {
     }
 
     parsedInput->command = calloc(strlen(token) + 1, sizeof(char));
-    parsedInput->command = token;
+    strcpy(parsedInput->command, token);
 
     token = strtok_r(NULL, " ", &posptr);
     while (token != NULL) {
@@ -118,6 +136,37 @@ struct userInput *parseUserInput(char *ui) {
 }
 
 /*
+Redirects I/O if input and/or output is passed to commands
+*/
+void redirect(struct userInput *ui) {
+    int inputfd = STDIN_FILENO;
+    int outputfd = STDOUT_FILENO;
+
+    if (ui->inputFile != NULL) {
+        inputfd = open(ui->inputFile, O_RDONLY);
+        // check if valid file name and display error if not
+        if (inputfd < 0) {
+            printf("Input file does not exist");
+            exit(1);
+        }
+        // redirect input
+        dup2(inputfd, 0);
+        close(inputfd);
+    }
+
+    if (ui->outputFile != NULL) {
+        outputfd = open(ui->outputFile, O_WRONLY | O_CREAT | O_TRUNC);
+        if (outputfd < 0) {
+            printf("Error opening and/or creating output file");
+            exit(1);
+        }
+        // redirect output
+        dup2(outputfd, 1);
+        close(outputfd);
+    }
+}
+
+/*
 Creates an array of arguments to be passed to execvp
 using the arguments stored in struct userInput.userArgs
 */
@@ -144,27 +193,32 @@ void runProcess(struct userInput *ui) {
     switch (spawnid) {
         case -1:
             printf("Oops! Something went wrong during fork!\n");
+            fflush(stdout);
             exit(1);
             break;
 
         case 0:
+            redirect(ui);
             execvp(ui->command, ui->builtArgs);
             printf("Oops! Error while running shell command!\n");
+            fflush(stdout);
             exit(1);
 
         default:
             if (ui->inBackground == true && foregroundOnly == false) {
                 printf("Backgroud pid is %d\n", spawnid);
+                fflush(stdout);
             } else {
                 // waits for the child process to execute
                 waitpid(spawnid, &childStatus, 0);
+                foregroundStatus = childStatus;
             }
     }
 }
 
 int main(void) {
     struct userInput *ui;
-
+    int fstat;
     char *uInput;
     int i = 0;
 
@@ -175,15 +229,25 @@ int main(void) {
 
         // check if user entered a blank line or comment
         if (ui->command == NULL || strncmp(ui->command, "#", 1) == 0) {
+            fflush(stdin);
+            fflush(stdout);
+            printf("\n");
             continue;
         }
         // check for exit command
         else if (strcmp(ui->command, "exit") == 0) {
+            printf("cd command not implemented\n");
             break;
         } else if (strcmp(ui->command, "status") == 0) {
-            printf("status not implemented");
+            // Get exit status of last foreground process run in shell
+            if (WIFEXITED(foregroundStatus)) {
+                fstat = WEXITSTATUS(foregroundStatus);
+            } else {
+                fstat = WTERMSIG(foregroundStatus);
+            }
+            printf("exit status %d\n", fstat);
         } else if (strcmp(ui->command, "cd") == 0) {
-            printf("cd command not implemented");
+            printf("cd command not implemented\n");
         } else {
             runProcess(ui);
         }
@@ -199,8 +263,8 @@ int main(void) {
         fflush(stdin);
         fflush(stdout);
 
-        // free memory from userInput struct
-        free(ui);
+        // clear input from struct and free memory
+        clearUserInput(ui);
     }
 
     return EXIT_SUCCESS;
