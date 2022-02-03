@@ -1,5 +1,6 @@
 #include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,10 +13,15 @@
 
 #define MAXLENGTH 2048
 #define MAXARGS 512
+// max processes to be run in background
+#define MAXPROCS 200
 
 // Globals
 bool foregroundOnly = false;
 int foregroundStatus;
+// track pids of background processes
+pid_t backgroundProcs[MAXPROCS];
+int procNum = 0;  // track number of background processes
 
 // struct to store parsed user input
 struct userInput {
@@ -59,6 +65,14 @@ void clearUserInput(struct userInput *ui) {
     free(ui->inputFile);
     free(ui->outputFile);
 
+    // loop through userArgs to free allocated memory
+    for (int i = 0; i < MAXARGS; i++) {
+        if (ui->userArgs[i] != NULL) {
+            free(ui->userArgs[i]);
+        } else {
+            break;
+        }
+    }
     // reset values stored that have set lengths
     memset(ui->userArgs, '\0', sizeof(ui->userArgs));
     memset(ui->builtArgs, '\0', sizeof(ui->builtArgs));
@@ -146,7 +160,8 @@ void redirect(struct userInput *ui) {
         inputfd = open(ui->inputFile, O_RDONLY);
         // check if valid file name and display error if not
         if (inputfd < 0) {
-            printf("Input file does not exist");
+            printf("Input file does not exist\n");
+            fflush(stdout);
             exit(1);
         }
         // redirect input
@@ -155,9 +170,10 @@ void redirect(struct userInput *ui) {
     }
 
     if (ui->outputFile != NULL) {
-        outputfd = open(ui->outputFile, O_WRONLY | O_CREAT | O_TRUNC);
+        outputfd = open(ui->outputFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (outputfd < 0) {
-            printf("Error opening and/or creating output file");
+            printf("Error opening and/or creating output file\n");
+            fflush(stdout);
             exit(1);
         }
         // redirect output
@@ -183,10 +199,26 @@ void buildArgs(struct userInput *ui) {
     }
 }
 
+/*
+Catches SIGSTP signal. The shell then enters a state where subsequent
+commands can no longer be run in the background.
+*/
+void catchSigstp(void) {
+}
+
+/*
+Catches Child Signal. Upon a Child process ending prints pid and exit
+value or signal that terminated process
+*/
+void catchChildsig(void) {
+}
+
 void runProcess(struct userInput *ui) {
     pid_t spawnid = -5;
     int childStatus;
     int childPid;
+    int termsig;
+    struct sigaction sigintAction;
 
     // If fork is successful, the value of spawnpid will be 0 in the child, the child's pid in the parent
     spawnid = fork();
@@ -198,7 +230,16 @@ void runProcess(struct userInput *ui) {
             break;
 
         case 0:
+            // set sa_handler back to default behaviour for child process if running in foreground
+            if (ui->inBackground == false) {
+                sigintAction.sa_handler = SIG_DFL;
+                sigintAction.sa_flags = 0;
+                sigaction(SIGINT, &sigintAction, NULL);
+            }
+
+            // handles redirection of I/O
             redirect(ui);
+            // executes command
             execvp(ui->command, ui->builtArgs);
             printf("Oops! Error while running shell command!\n");
             fflush(stdout);
@@ -206,13 +247,55 @@ void runProcess(struct userInput *ui) {
 
         default:
             if (ui->inBackground == true && foregroundOnly == false) {
+                // add to array to track
+                backgroundProcs[procNum] = getpid();
+                // increment count of background processes
+                procNum++;
+
                 printf("Backgroud pid is %d\n", spawnid);
                 fflush(stdout);
             } else {
                 // waits for the child process to execute
                 waitpid(spawnid, &childStatus, 0);
                 foregroundStatus = childStatus;
+
+                // prints signal that terminated child process
+                if (WIFSIGNALED(foregroundStatus)) {
+                    termsig = WTERMSIG(foregroundStatus);
+                    printf("\nterminated by signal: %d\n", termsig);
+                }
             }
+    }
+}
+
+/*
+handles builtin command cd. If no arguments passed then
+sets cwd to HOME env variable.
+*/
+void changeDirectory(struct userInput *ui) {
+    char *home = getenv("HOME");
+
+    // navigate to home if no path specified
+    if (ui->userArgs[0] == NULL) {
+        if (chdir(home) != 0) {
+            printf("Directory not found\n");
+            fflush(stdout);
+        }
+    } else {
+        if (chdir(ui->userArgs[0]) != 0) {
+            printf("Directory: %s not found\n", ui->userArgs[0]);
+            fflush(stdout);
+        }
+    }
+}
+
+/*
+handles builtin command exit. Kills all processes running in
+background
+*/
+void exitProcess(void) {
+    for (int i = procNum; i > -1; i--) {
+        kill(backgroundProcs[i], SIGINT);
     }
 }
 
@@ -222,7 +305,15 @@ int main(void) {
     char *uInput;
     int i = 0;
 
+    // initialize and fill ignoreAction struct
+    struct sigaction ignoreAction;
+    ignoreAction.sa_handler = SIG_IGN;
+    ignoreAction.sa_flags = 0;
+
     while (true) {
+        // ignore SIGINT for parent process
+        sigaction(SIGINT, &ignoreAction, NULL);
+
         uInput = getUserInput();
         ui = parseUserInput(uInput);
         buildArgs(ui);
@@ -231,12 +322,12 @@ int main(void) {
         if (ui->command == NULL || strncmp(ui->command, "#", 1) == 0) {
             fflush(stdin);
             fflush(stdout);
-            printf("\n");
+            clearUserInput(ui);
             continue;
         }
         // check for exit command
         else if (strcmp(ui->command, "exit") == 0) {
-            printf("cd command not implemented\n");
+            exitProcess();
             break;
         } else if (strcmp(ui->command, "status") == 0) {
             // Get exit status of last foreground process run in shell
@@ -246,19 +337,12 @@ int main(void) {
                 fstat = WTERMSIG(foregroundStatus);
             }
             printf("exit status %d\n", fstat);
+            fflush(stdout);
         } else if (strcmp(ui->command, "cd") == 0) {
-            printf("cd command not implemented\n");
+            changeDirectory(ui);
         } else {
             runProcess(ui);
         }
-
-        // printf("command: %s\ninput file: %s\noutputfile: %s\nbackground: %d\nredirect: %d\n", ui->command, ui->inputFile, ui->outputFile, ui->inBackground, ui->redirect);
-
-        // while (ui->builtArgs[i] != NULL) {
-        //     printf("%s ", ui->builtArgs[i]);
-        //     i++;
-        // }
-        // i = 0;
 
         fflush(stdin);
         fflush(stdout);
