@@ -170,6 +170,7 @@ void redirect(struct userInput *ui) {
     }
 
     if (ui->outputFile != NULL) {
+        // open file with permissions rw-r--r--
         outputfd = open(ui->outputFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (outputfd < 0) {
             printf("Error opening and/or creating output file\n");
@@ -183,18 +184,68 @@ void redirect(struct userInput *ui) {
 }
 
 /*
+Expands $$ to the pid of shell process
+*/
+void expandVar(char *line) {
+    pid_t shellPid;
+    char strShellPid[11];  // store pid of shell, 11 should be sufficient to store pid as char array
+    char *replacement;
+    char *pos;
+    int i = 0;
+    char *temp = line;
+    // Get and make shell pid a char array
+    shellPid = getpid();
+    sprintf(strShellPid, "%d", shellPid);
+
+    // allocate strlen + (10 occurences of $$ expanded) to new string with expanded var $$
+    // handling up to 10 variable expansions in a line should be more than enough
+    replacement = calloc(strlen(line) + (strlen(strShellPid) * 10), sizeof(char));
+
+    // iterate through line to find and replace occurences of $$ with shell pid
+    while (*(line) != '\0') {
+        if (*(line) == '$' && *(line + 1) == '$') {
+            for (int j = 0; j < strlen(strShellPid); j++) {
+                replacement[i] = strShellPid[j];
+                i++;
+            }
+            line++;
+        } else {
+            replacement[i] = *(line);
+            i++;
+        }
+        line++;
+    }
+    // temp is pointer to beginning of line
+    strcpy(temp, replacement);
+}
+
+/*
 Creates an array of arguments to be passed to execvp
 using the arguments stored in struct userInput.userArgs
 */
 void buildArgs(struct userInput *ui) {
     int argCount = 0;
+    char *pos;
+    char dol = '$';
 
     // add command as first element of built args
     ui->builtArgs[argCount] = ui->command;
     argCount++;
 
     while (ui->userArgs[argCount - 1] != NULL) {
-        ui->builtArgs[argCount] = ui->userArgs[argCount - 1];
+        pos = strchr(ui->userArgs[argCount - 1], dol);
+        //check if $ is in arg
+        if (pos != NULL) {
+            // check if next char is also $
+            if (*(pos)++ == '$') {
+                expandVar(ui->userArgs[argCount - 1]);
+                ui->builtArgs[argCount] = ui->userArgs[argCount - 1];
+            } else {
+                ui->builtArgs[argCount] = ui->userArgs[argCount - 1];
+            }
+        } else {
+            ui->builtArgs[argCount] = ui->userArgs[argCount - 1];
+        }
         argCount++;
     }
 }
@@ -298,6 +349,7 @@ void runProcess(struct userInput *ui) {
                 if (WIFSIGNALED(foregroundStatus)) {
                     termsig = WTERMSIG(foregroundStatus);
                     printf("\nterminated by signal: %d\n", termsig);
+                    fflush(stdout);
                 }
             }
     }
@@ -317,7 +369,7 @@ void changeDirectory(struct userInput *ui) {
             fflush(stdout);
         }
     } else {
-        if (chdir(ui->userArgs[0]) != 0) {
+        if (chdir(ui->builtArgs[1]) != 0) {
             printf("Directory: %s not found\n", ui->userArgs[0]);
             fflush(stdout);
         }
@@ -358,7 +410,7 @@ int main(void) {
 
         uInput = getUserInput();
         ui = parseUserInput(uInput);
-        buildArgs(ui);
+        buildArgs(ui);  // creates an array to used with execvp
 
         // check if user entered a blank line or comment
         if (ui->command == NULL || strncmp(ui->command, "#", 1) == 0) {
