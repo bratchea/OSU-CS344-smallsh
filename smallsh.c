@@ -203,14 +203,49 @@ void buildArgs(struct userInput *ui) {
 Catches SIGSTP signal. The shell then enters a state where subsequent
 commands can no longer be run in the background.
 */
-void catchSigstp(void) {
+void catchSigstp(int signo) {
+    if (foregroundOnly) {
+        char *message = "Exiting foreground only mode (& is no longer ignored)\n";
+        write(STDOUT_FILENO, message, 56);
+        foregroundOnly = false;
+    } else {
+        char *message = "Entering foreground-only mode (& is now ignored)\n";
+        write(STDOUT_FILENO, message, 51);
+        foregroundOnly = true;
+    }
 }
 
 /*
-Catches Child Signal. Upon a Child process ending prints pid and exit
-value or signal that terminated process
+Checks for completed background processes and prints pid and exit if completed
 */
-void catchChildsig(void) {
+void checkBackground(void) {
+    int childStatus;
+    pid_t pid;
+
+    for (int i = 0; i < procNum; i++) {
+        pid = waitpid(backgroundProcs[i], &childStatus, WNOHANG);
+        if (pid != 0 && WIFEXITED(childStatus) != 0) {
+            printf("\nbackground pid %d is done: exit value %d\n", backgroundProcs[i], WEXITSTATUS(childStatus));
+            fflush(stdout);
+
+            // remove pid from background procs and shift left
+            for (int j = i; j < procNum - 1; j++) {
+                backgroundProcs[j] = backgroundProcs[j + 1];
+            }
+            // decrement total number of background processes
+            procNum--;
+        } else if (pid != 0) {
+            printf("\nbackground pid %d is done: terminated by signal %d\n", backgroundProcs[i], WTERMSIG(childStatus));
+            fflush(stdout);
+
+            // remove pid from background procs and shift left
+            for (int j = i; j < procNum - 1; j++) {
+                backgroundProcs[j] = backgroundProcs[j + 1];
+            }
+            // decrement total number of background processes
+            procNum--;
+        }
+    }
 }
 
 void runProcess(struct userInput *ui) {
@@ -246,13 +281,13 @@ void runProcess(struct userInput *ui) {
             exit(1);
 
         default:
-            if (ui->inBackground == true && foregroundOnly == false) {
+            if (ui->inBackground && !foregroundOnly) {
                 // add to array to track
-                backgroundProcs[procNum] = getpid();
+                backgroundProcs[procNum] = spawnid;
                 // increment count of background processes
                 procNum++;
 
-                printf("Backgroud pid is %d\n", spawnid);
+                printf("Background pid is %d\n", spawnid);
                 fflush(stdout);
             } else {
                 // waits for the child process to execute
@@ -305,14 +340,21 @@ int main(void) {
     char *uInput;
     int i = 0;
 
-    // initialize and fill ignoreAction struct
+    // initialize and fill sigaction struct for SIGINT
     struct sigaction ignoreAction;
     ignoreAction.sa_handler = SIG_IGN;
     ignoreAction.sa_flags = 0;
 
+    //initialize and fill sigaction strcut for SIGTSTP
+    struct sigaction sigtstpAction;
+    sigtstpAction.sa_handler = catchSigstp;
+    sigtstpAction.sa_flags = SA_RESTART;
+
     while (true) {
         // ignore SIGINT for parent process
         sigaction(SIGINT, &ignoreAction, NULL);
+        // handle SIGTSTP
+        sigaction(SIGTSTP, &sigtstpAction, NULL);
 
         uInput = getUserInput();
         ui = parseUserInput(uInput);
@@ -343,6 +385,9 @@ int main(void) {
         } else {
             runProcess(ui);
         }
+
+        // check for completed background processes
+        checkBackground();
 
         fflush(stdin);
         fflush(stdout);
